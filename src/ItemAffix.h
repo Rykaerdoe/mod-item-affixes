@@ -278,6 +278,12 @@ public:
     void InitTalentAffix(Player* player, Item* item, int8 specOverride = -1, uint8 affixSlot = 0,
                           bool includeOtherSpecWeighted = false, uint32 ownSpecWeight = 1);
 
+    // Roll every UNROLLED slot on an item immediately (APPLIED). Skips slots that are
+    // already PENDING or APPLIED. Used by the .affix botroll command to roll a bot's
+    // items without touching already-rolled affixes.
+    // Returns the number of slots actually rolled (0 if the item had no UNROLLED slots).
+    uint8 RollUnrolledSlots(Player* player, Item* item);
+
     // Send CONFIG message to client with server-side feature toggle flags.
     void SendConfig(Player* player);
 

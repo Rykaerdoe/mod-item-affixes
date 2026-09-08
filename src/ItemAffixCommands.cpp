@@ -3,8 +3,10 @@
 #include "CommandScript.h"
 #include "Creature.h"
 #include "DatabaseEnv.h"
+#include "Group.h"
 #include "Item.h"
 #include "ItemAffix.h"
+#include "ObjectAccessor.h"
 #include "Player.h"
 #include "PlayerProgression.h"
 #include "RBAC.h"
@@ -31,11 +33,18 @@ public:
             { "roll",    HandleAffixReforgeRollCommand,    rbac::RBAC_PERM_COMMAND_GM, Console::No },
             { "pick",    HandleAffixReforgePickCommand,    rbac::RBAC_PERM_COMMAND_GM, Console::No },
         };
+        static ChatCommandTable botrollCommandTable =
+        {
+            { "bot",    HandleAffixBotRollBotCommand,     rbac::RBAC_PERM_COMMAND_GM, Console::No },
+            { "group",  HandleAffixBotRollGroupCommand,   rbac::RBAC_PERM_COMMAND_GM, Console::No },
+            { "raid",   HandleAffixBotRollRaidCommand,    rbac::RBAC_PERM_COMMAND_GM, Console::No },
+        };
         static ChatCommandTable affixCommandTable =
         {
             { "reroll",       HandleAffixRerollCommand,   rbac::RBAC_PERM_COMMAND_GM, Console::No },
             { "info",         HandleAffixInfoCommand,     rbac::RBAC_PERM_COMMAND_GM, Console::No },
             { "talents",      HandleAffixTalentsCommand,  rbac::RBAC_PERM_COMMAND_GM, Console::No },
+            { "botroll",      botrollCommandTable },
             { "progression",  progressionCommandTable },
             { "reforge",      reforgeCommandTable },
         };
@@ -44,6 +53,179 @@ public:
             { "affix", affixCommandTable },
         };
         return commandTable;
+    }
+
+    // -----------------------------------------------------------------------
+    // .affix botroll helpers — iterate a player's items and roll UNROLLED slots
+    // -----------------------------------------------------------------------
+
+    // Roll every UNROLLED slot on all equipped + bagged items for one player.
+    // Returns the total number of items that had at least one slot rolled.
+    static uint32 RollBotPlayerItems(Player* bot)
+    {
+        if (!bot)
+            return 0;
+
+        uint32 itemsRolled = 0;
+
+        auto rollItemIfAffixes = [&](Item* item) -> bool
+        {
+            if (!item)
+                return false;
+
+            ItemTemplate const* proto = item->GetTemplate();
+            if (!proto)
+                return false;
+
+            // Only gear-quality items have affix rows.
+            switch (proto->Quality)
+            {
+                case ITEM_QUALITY_POOR:
+                case ITEM_QUALITY_NORMAL:
+                    return false;
+                default:
+                    break;
+            }
+
+            // Check if this item has any affix rows at all.
+            QueryResult result = CharacterDatabase.Query(
+                "SELECT 1 FROM item_affix WHERE item_guid = {} LIMIT 1",
+                static_cast<uint64>(item->GetGUID().GetRawValue()));
+            if (!result)
+                return false;  // no affix data — skip
+
+            uint8 rolled = sItemAffixMgr->RollUnrolledSlots(bot, item);
+            if (rolled == 0)
+                return false;  // had affix rows, but all were already PENDING/APPLIED
+
+            ++itemsRolled;
+            return true;
+        };
+
+        // Equipped slots.
+        for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+            rollItemIfAffixes(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot));
+
+        // Backpack.
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+            rollItemIfAffixes(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot));
+
+        // Equipped bags and their contents.
+        for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
+        {
+            Bag* pBag = bot->GetBagByPos(bag);
+            if (!pBag)
+                continue;
+            for (uint32 j = 0; j < pBag->GetBagSize(); ++j)
+                rollItemIfAffixes(bot->GetItemByPos(bag, static_cast<uint8>(j)));
+        }
+
+        return itemsRolled;
+    }
+
+    // .affix botroll bot <botName> — rolls UNROLLED slots on a single named bot.
+    static bool HandleAffixBotRollBotCommand(ChatHandler* handler, std::string botName)
+    {
+        if (botName.empty())
+        {
+            handler->SendSysMessage("|cffFFFF00[ItemAffixes]|r Usage: .affix botroll bot <botName>");
+            return true;
+        }
+
+        // Find the bot by name — scan all players for a matching bot.
+        Player* targetBot = nullptr;
+        uint32 totalItems = 0;
+
+        for (auto const& [guid, player] : ObjectAccessor::GetPlayers())
+        {
+            if (!player || !player->IsInWorld())
+                continue;
+            // GetSession()->IsBot() rather than the narrower IsRandomBot(), so
+            // this also matches alt bots, not just auto-generated random bots.
+            if (!player->GetSession()->IsBot())
+                continue;
+            if (player->GetName() == botName)
+            {
+                targetBot = player;
+                break;
+            }
+        }
+
+        if (!targetBot)
+        {
+            handler->PSendSysMessage("|cffFFFF00[ItemAffixes]|r Bot '{}' not found.", botName);
+            return true;
+        }
+
+        totalItems = RollBotPlayerItems(targetBot);
+        handler->PSendSysMessage("|cffFFFF00[ItemAffixes]|r Botroll '{}': {} item(s) rolled.", botName, totalItems);
+        return true;
+    }
+
+    // .affix botroll group — rolls UNROLLED slots on every random bot in the caller's group.
+    static bool HandleAffixBotRollGroupCommand(ChatHandler* handler)
+    {
+        Player* player = handler->GetSession()->GetPlayer();
+        Group* group = player->GetGroup();
+
+        if (!group)
+        {
+            handler->SendSysMessage("|cffFFFF00[ItemAffixes]|r You are not in a group.");
+            return true;
+        }
+
+        uint32 totalItems = 0;
+        uint32 botsProcessed = 0;
+
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* member = itr->GetSource();
+            if (!member || !member->IsInWorld())
+                continue;
+            // GetSession()->IsBot() rather than the narrower IsRandomBot(), so
+            // this also matches alt bots, not just auto-generated random bots.
+            if (!member->GetSession()->IsBot())
+                continue;
+
+            ++botsProcessed;
+            totalItems += RollBotPlayerItems(member);
+        }
+
+        handler->PSendSysMessage("|cffFFFF00[ItemAffixes]|r Botroll group: {} bot(s), {} item(s) rolled.", botsProcessed, totalItems);
+        return true;
+    }
+
+    // .affix botroll raid — rolls UNROLLED slots on every random bot in the caller's raid.
+    static bool HandleAffixBotRollRaidCommand(ChatHandler* handler)
+    {
+        Player* player = handler->GetSession()->GetPlayer();
+        Group* group = player->GetGroup();
+
+        if (!group || !group->isRaidGroup())
+        {
+            handler->SendSysMessage("|cffFFFF00[ItemAffixes]|r You are not in a raid.");
+            return true;
+        }
+
+        uint32 totalItems = 0;
+        uint32 botsProcessed = 0;
+
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* member = itr->GetSource();
+            if (!member || !member->IsInWorld())
+                continue;
+            // GetSession()->IsBot() rather than the narrower IsRandomBot(), so
+            // this also matches alt bots, not just auto-generated random bots.
+            if (!member->GetSession()->IsBot())
+                continue;
+
+            ++botsProcessed;
+            totalItems += RollBotPlayerItems(member);
+        }
+
+        handler->PSendSysMessage("|cffFFFF00[ItemAffixes]|r Botroll raid: {} bot(s), {} item(s) rolled.", botsProcessed, totalItems);
+        return true;
     }
 
     // .affix reroll

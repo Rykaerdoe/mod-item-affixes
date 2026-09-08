@@ -1679,6 +1679,139 @@ void ItemAffixMgr::AutoRollD3Item(Player* player, Item* item, uint8 existingCoun
 }
 
 // ---------------------------------------------------------------------------
+// RollUnrolledSlots — rolls every UNROLLED slot on an item immediately.
+// Called by .affix botroll to pre-roll a bot's items. Skips slots that are
+// already PENDING or APPLIED (never overwrites a chosen affix).
+// Returns the number of slots actually rolled, so callers can tell a real
+// roll apart from a no-op re-run on an item that was already fully rolled.
+// ---------------------------------------------------------------------------
+
+uint8 ItemAffixMgr::RollUnrolledSlots(Player* player, Item* item)
+{
+    if (!player || !item || _pool.empty())
+        return 0;
+
+    uint64 itemGuid = item->GetGUID().GetRawValue();
+    ItemTemplate const* proto = item->GetTemplate();
+    if (!proto)
+        return 0;
+
+    // Load existing slot state from DB — need the affix_slot column to know which slot to update.
+    QueryResult result = CharacterDatabase.Query(
+        "SELECT affix_slot, roll_state FROM item_affix WHERE item_guid = {} ORDER BY affix_slot",
+        itemGuid);
+    if (!result)
+        return 0;  // no affix rows yet — skip
+
+    uint8  numSlots   = static_cast<uint8>(result->GetRowCount());
+    uint8  quality    = static_cast<uint8>(proto->Quality);
+    uint8  playerClass = player->getClass();
+    int    resolvedSpec = GetDominantTalentTree(player);
+    uint8  roleForRoll = GetAutoRole(playerClass, resolvedSpec);
+    uint8  mainStat   = GetAutoMainStat(playerClass, resolvedSpec);
+
+    float itemBudget = ComputeItemBudget(proto->ItemLevel)
+                     * GetSlotBudgetMod(proto->InventoryType)
+                     * GetQualityFraction(quality);
+    bool is2H = Is2HWeapon(item);
+    bool isGem = (proto->Class == ITEM_CLASS_GEM);
+
+    uint8 prefixCount = isGem ? 0 : static_cast<uint8>((numSlots + 1) / 2);
+
+    uint32 effectiveCritChance = std::min<uint32>(_critRollChance +
+        uint32(sPlayerProgressionMgr->GetNodeBonus(player->GetGUID().GetRawValue(), NODE_CRIT_ROLL_CHANCE)), 100);
+
+    uint8 rolledCount = 0;
+
+    // Iterate over every slot; only roll UNROLLED ones.
+    do
+    {
+        Field* f = result->Fetch();
+        uint8 affixSlot = f[0].Get<uint8>();
+        uint8 rollState = f[1].Get<uint8>();
+
+        if (rollState != AFFIX_ROLL_UNROLLED)
+            continue;  // already PENDING or APPLIED — skip
+
+        bool wantPrefix = !isGem && (affixSlot < prefixCount);
+
+        // Imprint roll: same rule as D3 mode — only for prefix slots.
+        if (wantPrefix && urand(0, 99) < _imprintRollChance)
+        {
+            if (ImprintDef const* impDef = sImprintMgr->GetEligibleImprintForRoll(player, item, static_cast<int8>(resolvedSpec)))
+            {
+                sImprintMgr->ApplyImprintFromRoll(player, item, impDef->id);
+            }
+        }
+
+        // Roll the affix ID.
+        uint32 id = wantPrefix
+            ? RollAffixId(quality, player, item, /*genericsOnly*/false, /*classBoost*/0,
+                           /*classOnly*/true, roleForRoll, mainStat, -1, _d3DominantSpecWeight + 1,
+                           _d3OverrideClassAffixMaxPerItem)
+            : 0;
+        if (!id)
+            id = RollAffixId(quality, player, item, /*genericsOnly*/true, /*classBoost*/0,
+                              /*classOnly*/false, roleForRoll, mainStat, -1);
+
+        if (!id)
+            continue;  // no eligible affix — leave UNROLLED
+
+        auto const* def = GetAffixDef(id);
+        int32 rolledValue = (def && def->affixType == AFFIX_TYPE_STAT)
+            ? RollBudgetStatValue(def->statOp, itemBudget, _budgetMinRoll)
+            : 0;
+
+        // 2H weapon bonus.
+        if (is2H && def)
+        {
+            if (def->affixType == AFFIX_TYPE_STAT)
+                rolledValue = (rolledValue * 3 + 1) / 2;
+            else if (def->affixType == AFFIX_TYPE_SPELLMOD)
+                rolledValue = 150;
+        }
+
+        // Crit roll.
+        bool critHit = def && _critRollEnabled && urand(0, 99) < effectiveCritChance;
+        if (critHit)
+        {
+            if (def->affixType == AFFIX_TYPE_STAT)
+                rolledValue = (rolledValue * 3 + 1) / 2;
+            else if (def->affixType == AFFIX_TYPE_SPELLMOD)
+                rolledValue = (rolledValue == 150) ? 250 : 200;
+        }
+
+        // Persist: INSERT for a new row, or UPDATE if the row already exists.
+        CharacterDatabase.DirectExecute(
+            "INSERT INTO item_affix (item_guid, affix_slot, affix_id, rolled_value, roll_state, pending_opts, is_crit) "
+            "VALUES ({}, {}, {}, {}, {}, '', {}) "
+            "ON DUPLICATE KEY UPDATE affix_id = {}, rolled_value = {}, roll_state = {}, pending_opts = '', is_crit = {}",
+            itemGuid, affixSlot, id, rolledValue, uint8(AFFIX_ROLL_APPLIED), uint8(critHit),
+            id, rolledValue, uint8(AFFIX_ROLL_APPLIED), uint8(critHit));
+
+        sPlayerProgressionMgr->GrantAffixXP(player, quality);
+
+        // Talent affix.
+        if (_enableTalentAffixes)
+            InitTalentAffix(player, item, -1, affixSlot, /*includeOtherSpecWeighted*/true, _d3DominantSpecWeight + 1);
+
+        ++rolledCount;
+    } while (result->NextRow());
+
+    if (rolledCount == 0)
+        return 0;  // every slot was already PENDING/APPLIED -- nothing to sync
+
+    // Sync and notify client.
+    uint8 bagSlot  = item->GetBagSlot();
+    uint8 itemSlot = item->GetSlot();
+    if (bagSlot == INVENTORY_SLOT_BAG_0 && itemSlot < EQUIPMENT_SLOT_END)
+        SyncAffixes(player);
+
+    SendItemStatus(player, item);
+    return rolledCount;
+}
+
+// ---------------------------------------------------------------------------
 // Upgrade2HSlots — retroactively grants the extra affix slot to 2H weapons that
 // were initialized before the 2H bonus was introduced. Called from OnPlayerLogin
 // for every item in the player's bags and equipment. Uses DirectExecute so the
