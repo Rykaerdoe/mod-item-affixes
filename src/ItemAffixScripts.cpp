@@ -3,6 +3,7 @@
 #include "PlayerProgression.h"
 #include "GameTime.h"
 #include "CellImpl.h"
+#include "Chat.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
 #include "Item.h"
@@ -16,6 +17,29 @@
 #include "SpellMgr.h"
 #include "SpellScript.h"
 #include "TemporarySummon.h"
+
+#ifdef MOD_PLAYERBOTS
+#include "RandomPlayerbotMgr.h"
+#endif
+
+// Alt bots (a player's own additional bot-controlled characters) get their
+// gear auto-rolled on equip, same as if someone ran .affix botroll on them --
+// there's no addon UI for a player to manually reroll a party member's item.
+// Random bots aren't included: they're covered by LootMode=1 if that's
+// enabled, and RollUnrolledSlots is a no-op anyway if there's nothing
+// UNROLLED left to do, so this never double-rolls either way.
+// Builds fine without mod-playerbots present -- alt vs random bot can't be
+// told apart without it, so this just treats every bot as "not an alt bot".
+static bool IsAltBot(Player* player)
+{
+    if (!player || !player->GetSession()->IsBot())
+        return false;
+#ifdef MOD_PLAYERBOTS
+    return !sRandomPlayerbotMgr.IsRandomBot(player);
+#else
+    return false;
+#endif
+}
 
 // ============================================================================
 // WorldScript — template loading
@@ -144,6 +168,29 @@ public:
 
     void OnPlayerEquip(Player* player, Item* it, uint8 /*bag*/, uint8 /*slot*/, bool /*update*/) override
     {
+        if (it && IsAltBot(player) && sItemAffixMgr->IsAutoRollAltBotsOnEquipEnabled())
+        {
+            if (uint8 rolled = sItemAffixMgr->RollUnrolledSlots(player, it))
+            {
+                // Alt bots only ever play grouped -- tell the real player(s) in
+                // the group what just got rolled instead of doing it silently.
+                if (Group* group = player->GetGroup())
+                {
+                    ItemTemplate const* proto = it->GetTemplate();
+                    std::string msg = Acore::StringFormat("|cffFFFF00[ItemAffixes]|r {} rolled {} affix{} on {}.",
+                        player->GetName(), rolled, rolled == 1 ? "" : "es",
+                        proto ? proto->Name1.c_str() : "an item");
+
+                    for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+                    {
+                        Player* member = itr->GetSource();
+                        if (member && member->IsInWorld() && !member->GetSession()->IsBot())
+                            ChatHandler(member->GetSession()).SendSysMessage(msg.c_str());
+                    }
+                }
+            }
+        }
+
         sItemAffixMgr->SyncAffixes(player);
         if (it)
             sItemAffixMgr->SendItemStatus(player, it);

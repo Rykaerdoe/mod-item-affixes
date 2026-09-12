@@ -284,6 +284,9 @@ public:
     // Returns the number of slots actually rolled (0 if the item had no UNROLLED slots).
     uint8 RollUnrolledSlots(Player* player, Item* item);
 
+    // Whether an alt bot's gear gets auto-rolled on equip (ItemAffixes.AutoRollAltBotsOnEquip).
+    bool IsAutoRollAltBotsOnEquipEnabled() const { return _autoRollAltBotsOnEquip; }
+
     // Send CONFIG message to client with server-side feature toggle flags.
     void SendConfig(Player* player);
 
@@ -539,6 +542,7 @@ private:
     uint8 _slotCountPurple          = 3;     // affix slots granted to epic (purple) items
     uint8 _slotCountLegendary       = 4;     // affix slots granted to legendary+ items
     uint8 _lootMode                 = 0;     // 0=Manual (current, player picks), 1=D3-style auto-roll on pickup
+    bool  _autoRollAltBotsOnEquip   = true;  // roll an alt bot's gear on equip, same as .affix botroll
     uint32 _d3DominantSpecWeight    = 0;     // D3 mode only: how many EXTRA times the player's dominant-spec
                                               // pool is counted vs. other-spec, for both prefix affixes and
                                               // talent affixes. 0 = fully random (default; every spec equally

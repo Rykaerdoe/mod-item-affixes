@@ -642,6 +642,7 @@ void ItemAffixMgr::LoadAffixTemplates()
     _slotCountPurple       = std::clamp(sConfigMgr->GetOption<uint8>("ItemAffixes.SlotCountPurple",    3), uint8(1), uint8(6));
     _slotCountLegendary    = std::clamp(sConfigMgr->GetOption<uint8>("ItemAffixes.SlotCountLegendary", 4), uint8(1), uint8(6));
     _lootMode              = std::clamp(sConfigMgr->GetOption<uint8>("ItemAffixes.LootMode", 0), uint8(0), uint8(1));
+    _autoRollAltBotsOnEquip = sConfigMgr->GetOption<bool>("ItemAffixes.AutoRollAltBotsOnEquip", true);
     _d3DominantSpecWeight  = sConfigMgr->GetOption<uint32>("ItemAffixes.D3DominantSpecWeight", 0u);
     _d3ExcludeQuestRewards = sConfigMgr->GetOption<bool>("ItemAffixes.D3ExcludeQuestRewards", true);
     _d3OverrideClassAffixMaxPerItem = sConfigMgr->GetOption<bool>("ItemAffixes.D3OverrideClassAffixMaxPerItem", false);

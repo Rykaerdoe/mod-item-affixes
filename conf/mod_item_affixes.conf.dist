@@ -27,6 +27,14 @@
 # — LootMode=1 bypasses the picker entirely, so there is nothing to select.
 ItemAffixes.LootMode = 1
 
+# Alt bots (a player's own additional bot-controlled characters, as opposed
+# to auto-generated random bots) have no addon UI to reroll their own gear
+# with, so their items are auto-rolled on equip instead -- same effect as
+# running .affix botroll on them. A message reporting what was rolled is
+# sent to the real player(s) in the bot's group. Set to 0 to disable and
+# require manual .affix botroll use instead. No effect on random bots.
+ItemAffixes.AutoRollAltBotsOnEquip = 1
+
 # D3 mode only (no effect in Manual mode). How strongly prefix (class/SpellMod)
 # affixes and talent affixes should favor the player's dominant talent tree,
 # without ever fully locking out the other two — weighted, not exclusive.
